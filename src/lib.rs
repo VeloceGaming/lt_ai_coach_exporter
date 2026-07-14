@@ -305,6 +305,17 @@ fn export_all(data: &ClientData) {
     write_file("champions.tsv", &(champions + "\n"));
     mark_trace(&mut trace, "write_champions");
 
+    // Champion metadata comes from the user's currently loaded game, including
+    // Workshop champions. The game owns category/raw tags; LT AI Coach derives
+    // its lightweight role prior from those fields instead of redistributing a
+    // third-party catalog.
+    let champion_metadata = champion_metadata_export(&db);
+    let champion_metadata_json =
+        serde_json::to_string(&champion_metadata).unwrap_or_else(|_| "null".to_string());
+    mark_trace(&mut trace, "serialize_champion_metadata");
+    write_file("champion_metadata.json", &champion_metadata_json);
+    mark_trace(&mut trace, "write_champion_metadata");
+
     // Teams — id<TAB>name, one per line, with a header row.
     let mut team_rows = vec!["id\tname".to_string()];
     for team_id in data.team_ids() {
@@ -411,6 +422,122 @@ fn export_all(data: &ClientData) {
     // Manifest stays last: its fresh timestamp is the coach's signal that all
     // export data and the performance trace are complete.
     write_file("manifest.tsv", &manifest);
+}
+
+fn champion_metadata_export(db: &ClientDatabase) -> serde_json::Value {
+    let sheet = serde_json::to_value(&db.champion_info_sheet).unwrap_or_default();
+    let mod_champions = sheet
+        .get("mod_champions")
+        .and_then(serde_json::Value::as_array);
+    let champions = db
+        .available_champions
+        .iter()
+        .map(|id| {
+            let info = sheet.get(id).or_else(|| {
+                mod_champions.and_then(|entries| {
+                    entries.iter().find(|entry| {
+                        entry.get("id").and_then(serde_json::Value::as_str) == Some(id.as_str())
+                    })
+                })
+            });
+            let category = info
+                .and_then(|value| value.get("category"))
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("Unknown");
+            let raw_tags: Vec<String> = info
+                .and_then(|value| value.get("tags"))
+                .and_then(serde_json::Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(serde_json::Value::as_str)
+                .map(str::to_string)
+                .collect();
+            let role_fit = derive_role_fit(category, &raw_tags);
+            serde_json::json!({
+                "id": id,
+                "category": category,
+                "rawTags": raw_tags,
+                "roleFit": role_fit,
+            })
+        })
+        .collect::<Vec<_>>();
+
+    serde_json::json!({
+        "schemaVersion": 1,
+        "champions": champions,
+    })
+}
+
+// The game does not expose numeric role-fit values. This deliberately small,
+// reviewable prior uses only its category and raw tags. The Coach blends it as
+// eight virtual games, so actual role usage continuously replaces it.
+fn derive_role_fit(category: &str, tags: &[String]) -> BTreeMap<&'static str, f64> {
+    let has = |tag: &str| {
+        tags.iter()
+            .any(|candidate| candidate.eq_ignore_ascii_case(tag))
+    };
+    let melee = category.eq_ignore_ascii_case("melee") || has("Melee");
+    let ranged = category.eq_ignore_ascii_case("range")
+        || category.eq_ignore_ascii_case("ranged")
+        || has("Range");
+
+    let mut scores = BTreeMap::from([
+        ("top", 20.0),
+        ("jungle", 20.0),
+        ("mid", 20.0),
+        ("bot", 20.0),
+        ("support", 20.0),
+    ]);
+    let mut add = |role: &'static str, value: f64| {
+        if let Some(score) = scores.get_mut(role) {
+            *score += value;
+        }
+    };
+
+    if melee {
+        add("top", 25.0);
+        add("jungle", 20.0);
+    }
+    if ranged {
+        add("mid", 15.0);
+        add("bot", 35.0);
+        add("support", 10.0);
+    }
+    if has("AD") {
+        add("top", 15.0);
+        add("jungle", 15.0);
+        add("bot", 35.0);
+    }
+    if has("AP") || has("Magic") {
+        add("mid", 35.0);
+        add("jungle", 10.0);
+        add("support", 10.0);
+    }
+    if has("Tank") {
+        add("top", 30.0);
+        add("jungle", 15.0);
+        add("support", 25.0);
+    }
+    if has("CC") {
+        add("top", 10.0);
+        add("jungle", 25.0);
+        add("mid", 10.0);
+        add("support", 25.0);
+    }
+    if has("Heal") {
+        add("support", 45.0);
+    }
+    if has("Shield") {
+        add("support", 45.0);
+    }
+
+    let peak = scores.values().copied().fold(0.0_f64, f64::max);
+    if peak > 0.0 {
+        for score in scores.values_mut() {
+            *score = (*score / peak * 1000.0).round() / 10.0;
+        }
+    }
+    scores
 }
 
 fn athlete_mastery_export(data: &ClientData) -> serde_json::Value {
@@ -605,43 +732,27 @@ fn sanitize(value: &str) -> String {
     value.replace(['\t', '\n', '\r'], " ")
 }
 
-/// Write a file to every export destination:
-///  * next to the mod (`mods/lt_ai_coach_exporter/<name>`) for easy inspection,
-///  * the LT AI Coach data folder, where the coach app reads it (the handshake).
+/// Write a file to the LT AI Coach data folder, where the Coach reads it.
 fn write_file(file_name: &str, contents: &str) {
-    for dir in export_dirs() {
-        let path = format!("{dir}/{file_name}");
-        if let Some(parent) = Path::new(&path).parent() {
-            let _ = fs::create_dir_all(parent);
-        }
-        let _ = fs::write(&path, contents);
+    let Some(dir) = coach_export_dir() else {
+        return;
+    };
+    let path = format!("{dir}/{file_name}");
+    if let Some(parent) = Path::new(&path).parent() {
+        let _ = fs::create_dir_all(parent);
     }
+    let _ = fs::write(&path, contents);
 }
 
 fn write_bytes(file_name: &str, contents: &[u8]) {
-    for dir in export_dirs() {
-        let path = format!("{dir}/{file_name}");
-        if let Some(parent) = Path::new(&path).parent() {
-            let _ = fs::create_dir_all(parent);
-        }
-        let _ = fs::write(path, contents);
+    let Some(dir) = coach_export_dir() else {
+        return;
+    };
+    let path = format!("{dir}/{file_name}");
+    if let Some(parent) = Path::new(&path).parent() {
+        let _ = fs::create_dir_all(parent);
     }
-}
-
-/// The directories the export is written to.
-fn export_dirs() -> Vec<String> {
-    let mut dirs = Vec::new();
-    // Local-to-game copy (handy for the user to eyeball).
-    dirs.push(if Path::new(&format!("mods/{MOD_ID}")).is_dir() {
-        format!("mods/{MOD_ID}")
-    } else {
-        MOD_ID.to_string()
-    });
-    // The coach's own data folder: %LOCALAPPDATA%/com.lttools.lt-ai-coach/exporter
-    if let Ok(local_app_data) = std::env::var("LOCALAPPDATA") {
-        dirs.push(format!("{local_app_data}/com.lttools.lt-ai-coach/exporter"));
-    }
-    dirs
+    let _ = fs::write(path, contents);
 }
 
 fn init(_ctx: &GameCtx) -> ModRegistration {

@@ -8,9 +8,9 @@
     }
   ],
   "description": "Game read-only exporter for LT AI Coach: writes the live game database (teams, players, matches, patches, etc) to files the coach imports. YOU NEED TO ENABLE THIS IN GAME.",
-  "last_updated": "2026-07-13",
+  "last_updated": "2026-07-14",
   "mod_id": "lt_ai_coach_exporter",
   "mod_type": "native",
   "name": "LT AI Coach Exporter",
-  "version": "1.1.1"
+  "version": "1.1.2"
 }
