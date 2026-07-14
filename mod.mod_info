@@ -1,0 +1,16 @@
+{
+  "author": "LT",
+  "contains_code": true,
+  "dependencies": [
+    {
+      "mod_id": "base",
+      "version": ">=0.4.14"
+    }
+  ],
+  "description": "Read-only exporter for LT AI Coach: writes the live game database (teams, players, matches, patches) to files the coach imports.",
+  "last_updated": "2026-06-25",
+  "mod_id": "lt_ai_coach_exporter",
+  "mod_type": "native",
+  "name": "LT AI Coach Exporter",
+  "version": "1.0.0"
+}

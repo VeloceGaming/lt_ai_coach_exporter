@@ -1,0 +1,17 @@
+/target/
+/target-*/
+/backup/
+/*.dll
+/*.exp
+/*.lib
+/*.pdb
+/*.rlib
+/*.log
+
+# Local/editor files
+.vs/
+.vscode/
+.idea/
+*.user
+*.suo
+*~

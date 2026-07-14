@@ -1,0 +1,13 @@
+[package]
+name = "lt_ai_coach_exporter"
+version = "1.0.0"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+# The bundled SDK injects the matching prebuilt mod_api crate (same as the
+# bridge and athlete_editor mods). No external crates are used.
+
+[workspace]
