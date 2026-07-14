@@ -1,16 +1,16 @@
 {
-  "author": "LT",
+  "author": "Layton",
   "contains_code": true,
   "dependencies": [
     {
       "mod_id": "base",
-      "version": ">=0.4.14"
+      "version": "=0.5.0"
     }
   ],
-  "description": "Read-only exporter for LT AI Coach: writes the live game database (teams, players, matches, patches) to files the coach imports.",
-  "last_updated": "2026-06-25",
+  "description": "Game read-only exporter for LT AI Coach: writes the live game database (teams, players, matches, patches, etc) to files the coach imports. YOU NEED TO ENABLE THIS IN GAME.",
+  "last_updated": "2026-07-13",
   "mod_id": "lt_ai_coach_exporter",
   "mod_type": "native",
   "name": "LT AI Coach Exporter",
-  "version": "1.0.0"
+  "version": "1.1.1"
 }
