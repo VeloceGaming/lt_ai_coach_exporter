@@ -19,7 +19,7 @@
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use mod_api::*;
 
@@ -29,6 +29,53 @@ const MOD_ID: &str = "lt_ai_coach_exporter";
 // exports the current game and deletes it. Nothing is exported otherwise.
 const REQUEST_FILE: &str = "request.txt";
 const PORTRAIT_REQUEST_FILE: &str = "portrait_request.txt";
+
+struct ExportTrace {
+    started: Instant,
+    previous: Instant,
+    rows: Vec<(&'static str, u128)>,
+}
+
+impl ExportTrace {
+    fn new() -> Self {
+        let now = Instant::now();
+        Self {
+            started: now,
+            previous: now,
+            rows: Vec::new(),
+        }
+    }
+
+    fn mark(&mut self, stage: &'static str) {
+        let now = Instant::now();
+        self.rows
+            .push((stage, now.duration_since(self.previous).as_micros()));
+        self.previous = now;
+    }
+
+    fn finish(mut self) {
+        self.rows
+            .push(("export_total", self.started.elapsed().as_micros()));
+        let mut output = String::from("stage\tduration_us\n");
+        for (stage, duration_us) in self.rows {
+            output.push_str(&format!("{stage}\t{duration_us}\n"));
+        }
+        write_file("performance_export.tsv", &output);
+    }
+}
+
+fn performance_enabled() -> bool {
+    std::env::var("LOCALAPPDATA")
+        .ok()
+        .map(|root| Path::new(&root).join("com.lttools.lt-ai-coach/performance.enabled"))
+        .is_some_and(|path| path.is_file())
+}
+
+fn mark_trace(trace: &mut Option<ExportTrace>, stage: &'static str) {
+    if let Some(trace) = trace {
+        trace.mark(stage);
+    }
+}
 
 #[derive(Default)]
 struct ExporterExtension;
@@ -237,6 +284,7 @@ fn mod_champion_names(
 
 /// Stage 1 export: enabled champions and the team list.
 fn export_all(data: &ClientData) {
+    let mut trace = performance_enabled().then(ExportTrace::new);
     let db = data.db();
     let save_id = db.id;
     let player_team_id = data.player_team_id();
@@ -250,10 +298,12 @@ fn export_all(data: &ClientData) {
     // patch) alongside partially initialized data; capturing every frame turns
     // those transients into enormous fake balance patches.
     capture_current_balance_snapshot(&db, &campaign_key);
+    mark_trace(&mut trace, "capture_balance_snapshot");
 
     // Enabled champions — one id per line.
     let champions = db.available_champions.join("\n");
     write_file("champions.tsv", &(champions + "\n"));
+    mark_trace(&mut trace, "write_champions");
 
     // Teams — id<TAB>name, one per line, with a header row.
     let mut team_rows = vec!["id\tname".to_string()];
@@ -265,6 +315,7 @@ fn export_all(data: &ClientData) {
     }
     let team_count = team_rows.len() - 1;
     write_file("teams.tsv", &(team_rows.join("\n") + "\n"));
+    mark_trace(&mut trace, "write_teams");
 
     // Players (athletes) — id<TAB>name. Same accessor pattern the athlete_editor
     // mod uses, so this is known-good against the live database.
@@ -277,13 +328,16 @@ fn export_all(data: &ClientData) {
     }
     let player_count = player_rows.len() - 1;
     write_file("players.tsv", &(player_rows.join("\n") + "\n"));
+    mark_trace(&mut trace, "write_players");
 
     // Athlete champion proficiency/mastery. The new game versions store this
     // on the athlete, separate from basic stat fields.
     let athlete_mastery = athlete_mastery_export(data);
     let athlete_mastery_json =
         serde_json::to_string(&athlete_mastery).unwrap_or_else(|_| "null".to_string());
+    mark_trace(&mut trace, "serialize_athletes");
     write_file("athlete_mastery.json", &athlete_mastery_json);
+    mark_trace(&mut trace, "write_athletes");
 
     // Matches — the data the coach scores on (picks, bans, per-player stats).
     // game_core's types derive serde `Serialize` (the save is bincode of them),
@@ -295,17 +349,23 @@ fn export_all(data: &ClientData) {
     // the `serde::Serialize` bound — only `serde_json` is an explicit extern.
     let tournament_json =
         serde_json::to_string(&db.match_replays).unwrap_or_else(|_| "null".to_string());
+    mark_trace(&mut trace, "serialize_match_replays");
     write_file("match_replays.json", &tournament_json);
+    mark_trace(&mut trace, "write_match_replays");
     let solo_json =
         serde_json::to_string(&db.solo_rank_matches).unwrap_or_else(|_| "null".to_string());
+    mark_trace(&mut trace, "serialize_solo_matches");
     write_file("solo_rank_matches.json", &solo_json);
+    mark_trace(&mut trace, "write_solo_matches");
 
     // Patch states (per-patch champion balance + available champions). The coach
     // uses this to detect which champions changed between patches. `pre_patch_data`
     // is the Database field the borrowed probe dumped under that same name.
     let patches_json =
         serde_json::to_string(&db.pre_patch_data).unwrap_or_else(|_| "null".to_string());
+    mark_trace(&mut trace, "serialize_patch_data");
     write_file("pre_patch_data.json", &patches_json);
+    mark_trace(&mut trace, "write_patch_data");
 
     // Exact champion balance sheets by game version. `pre_patch_data` is not a
     // complete history in every save (some saves retain only their initial
@@ -315,9 +375,12 @@ fn export_all(data: &ClientData) {
     // version. The coach can diff adjacent snapshots without reverse-engineering
     // champion-specific structs or maintaining a hand-written field list.
     let balance_history = champion_balance_history(&db, &campaign_key);
+    mark_trace(&mut trace, "build_balance_history");
     let balance_history_json =
         serde_json::to_string(&balance_history).unwrap_or_else(|_| "null".to_string());
+    mark_trace(&mut trace, "serialize_balance_history");
     write_file("champion_balance_history.json", &balance_history_json);
+    mark_trace(&mut trace, "write_balance_history");
 
     // Identify which game this export is from and when it was written, so the
     // coach can show the user exactly what it imported and warn if the data is
@@ -341,6 +404,12 @@ fn export_all(data: &ClientData) {
         match_replays,
         solo_rank_matches,
     );
+    mark_trace(&mut trace, "prepare_manifest");
+    if let Some(trace) = trace {
+        trace.finish();
+    }
+    // Manifest stays last: its fresh timestamp is the coach's signal that all
+    // export data and the performance trace are complete.
     write_file("manifest.tsv", &manifest);
 }
 
